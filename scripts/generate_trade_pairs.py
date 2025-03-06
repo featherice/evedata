@@ -116,12 +116,18 @@ def generate_trade_pairs(orders_df, prices_df=None, volumes_df=None):
         # Convert to DataFrame
         result_df = pd.DataFrame(trade_pairs)
         
-        # Add historical data if available
+        # Add historical data if available and filter pairs with no history
         if prices_df is not None and volumes_df is not None:
             logger.info("Adding historical data to trade pairs")
             result_df = add_historical_data(result_df, prices_df, volumes_df)
+            
+            # Filter out pairs with missing historical data (no trades this week)
+            missing_history = result_df['sell_price_avg_dest'].isna() | result_df['sell_volume_avg_dest'].isna()
+            if missing_history.any():
+                logger.info(f"Removing {missing_history.sum()} pairs with no recent trade history")
+                result_df = result_df[~missing_history]
         
-        logger.info(f"Generated {len(result_df)} trade pairs with profit potential")
+        logger.info(f"Generated {len(result_df)} trade pairs with profit potential and trade history")
         return result_df
     
     except Exception as e:
