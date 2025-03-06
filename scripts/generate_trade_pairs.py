@@ -72,9 +72,27 @@ def generate_trade_pairs(orders_df, prices_df=None, volumes_df=None):
             logger.error("No order data available")
             return None
             
+        # Exit if historical data is not available
+        if prices_df is None or volumes_df is None:
+            logger.error("Historical data required but not available")
+            return None
+            
         # Convert data types for efficiency
         orders_df['type_id'] = orders_df['type_id'].astype(np.int32)
         orders_df['station_id'] = orders_df['station_id'].astype(np.int32)
+        
+        # Prepare historical data
+        prices_df['type_id'] = prices_df['type_id'].astype(np.int32)
+        prices_df['location_id'] = prices_df['location_id'].astype(np.int32)
+        volumes_df['type_id'] = volumes_df['type_id'].astype(np.int32)
+        volumes_df['location_id'] = volumes_df['location_id'].astype(np.int32)
+        
+        # Select only the most recent data for each type/location
+        prices_df = prices_df.sort_values('date', ascending=False)
+        prices_df = prices_df.drop_duplicates(subset=['type_id', 'location_id'], keep='first')
+        
+        volumes_df = volumes_df.sort_values('date', ascending=False)
+        volumes_df = volumes_df.drop_duplicates(subset=['type_id', 'location_id'], keep='first')
         
         # Create list to hold trade pairs
         trade_pairs = []
@@ -99,6 +117,16 @@ def generate_trade_pairs(orders_df, prices_df=None, volumes_df=None):
                 
                 # Check if profit margin meets threshold
                 if price_diff_pct >= PROFIT_MARGIN_THRESHOLD:
+                    # Skip pair if no historical data is available for this type_id and destination station
+                    hist_price_exists = len(prices_df[(prices_df['type_id'] == type_id) & 
+                                                    (prices_df['location_id'] == dest_station)]) > 0
+                    hist_volume_exists = len(volumes_df[(volumes_df['type_id'] == type_id) & 
+                                                      (volumes_df['location_id'] == dest_station)]) > 0
+                    
+                    if not (hist_price_exists and hist_volume_exists):
+                        logger.info(f"Skipping type_id {type_id} at {dest_station} - no historical data found")
+                        continue
+                    
                     pair = {
                         'type_id': int(type_id),
                         'start_station_id': int(start_station),
@@ -116,18 +144,21 @@ def generate_trade_pairs(orders_df, prices_df=None, volumes_df=None):
         # Convert to DataFrame
         result_df = pd.DataFrame(trade_pairs)
         
-        # Add historical data if available and filter pairs with no history
-        if prices_df is not None and volumes_df is not None:
-            logger.info("Adding historical data to trade pairs")
-            result_df = add_historical_data(result_df, prices_df, volumes_df)
-            
-            # Filter out pairs with missing historical data (no trades this week)
-            missing_history = result_df['sell_price_avg_dest'].isna() | result_df['sell_volume_avg_dest'].isna()
-            if missing_history.any():
-                logger.info(f"Removing {missing_history.sum()} pairs with no recent trade history")
-                result_df = result_df[~missing_history]
+        if len(result_df) == 0:
+            logger.warning("No valid trade pairs found")
+            return None
         
-        logger.info(f"Generated {len(result_df)} trade pairs with profit potential and trade history")
+        # Add historical data
+        logger.info("Adding historical data to trade pairs")
+        result_df = add_historical_data(result_df, prices_df, volumes_df)
+        
+        # Drop any rows with missing historical data
+        original_count = len(result_df)
+        result_df = result_df.dropna(subset=['sell_price_low_dest', 'sell_price_avg_dest', 'sell_volume_avg_dest'])
+        if len(result_df) < original_count:
+            logger.info(f"Dropped {original_count - len(result_df)} pairs with missing historical data")
+        
+        logger.info(f"Generated {len(result_df)} trade pairs with profit potential")
         return result_df
     
     except Exception as e:
@@ -137,19 +168,6 @@ def generate_trade_pairs(orders_df, prices_df=None, volumes_df=None):
 def add_historical_data(trade_pairs_df, prices_df, volumes_df):
     """Add historical price and volume data to trade pairs."""
     try:
-        # Make sure type_id and station_id are the same data type for merging
-        prices_df['type_id'] = prices_df['type_id'].astype(np.int32)
-        prices_df['location_id'] = prices_df['location_id'].astype(np.int32)
-        volumes_df['type_id'] = volumes_df['type_id'].astype(np.int32)
-        volumes_df['location_id'] = volumes_df['location_id'].astype(np.int32)
-        
-        # Select only the most recent data for each type/location
-        prices_df = prices_df.sort_values('date', ascending=False)
-        prices_df = prices_df.drop_duplicates(subset=['type_id', 'location_id'], keep='first')
-        
-        volumes_df = volumes_df.sort_values('date', ascending=False)
-        volumes_df = volumes_df.drop_duplicates(subset=['type_id', 'location_id'], keep='first')
-        
         # Select only needed columns from historical data
         needed_price_cols = ['sell_price_low', 'sell_price_avg']
         needed_volume_cols = ['sell_volume_avg']
@@ -204,6 +222,9 @@ def main():
         
         # Load historical data
         prices_df, volumes_df = load_historic_data()
+        if prices_df is None or volumes_df is None:
+            logger.error("Cannot proceed without historical data")
+            sys.exit(1)
         
         # Generate trade pairs
         trade_pairs = generate_trade_pairs(orders_df, prices_df, volumes_df)
@@ -212,7 +233,9 @@ def main():
             # Create empty file to avoid errors
             empty_df = pd.DataFrame(columns=[
                 'type_id', 'start_station_id', 'dest_station_id', 
-                'price_start', 'price_dest'
+                'price_start', 'price_dest', 'volume_remain_start', 
+                'volume_remain_dest', 'supply_start', 'supply_dest',
+                'sell_price_low_dest', 'sell_price_avg_dest', 'sell_volume_avg_dest'
             ])
             empty_df.to_csv(os.path.join(PROCESSED_DIR, "trade_analysis.csv"), index=False)
             return
