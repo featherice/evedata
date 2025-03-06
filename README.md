@@ -1,45 +1,60 @@
-# EVE Online Market Data Processing
+# EVE Online Market Analysis
 
-This repository contains scripts to process EVE Online market data and find profitable trade opportunities between major trade hubs.
+Automated data pipeline to identify profitable trade routes between EVE Online trade hubs.
 
 ## Features
 
-- Automatic market data processing every 30 minutes
-- Weekly historic data updates
-- Trade pair analysis with profitability calculation
+- Collects and processes market sell orders from major trade hubs (Jita, Amarr, Ren, Hek, Dodixie)
+- Updates every 30 minutes using GitHub Actions
+- Incorporates historical price and volume data (updated weekly)
+- Identifies trade pairs with 10%+ profit margin
 
-## Trade Hubs
+## Data Processing Pipeline
 
-- Jita (60003760)
-- Amarr (60008494)
-- Rens (60004588)
-- Hek (60005686)
-- Dodixie (60011866)
+1. **Current Market Orders**
+   - Downloads latest market orders (refreshed every 20 minutes)
+   - Filters for sell orders at major trade hubs
+   - Calculates supply (volume of orders within 10% of lowest price)
+   - Identifies lowest priced orders per item type at each hub
 
-## Data Sources
+2. **Historical Data**
+   - Weekly collection of price and volume history
+   - Used to evaluate trade stability and demand patterns
 
-- Current market orders: https://data.everef.net/market-orders/market-orders-latest.v3.csv.bz2
-- Historic price data: https://static.adam4eve.eu/MarketPricesStationHistory/
-- Historic volume data: https://static.adam4eve.eu/MarketVolumesStationHistory/
+3. **Trade Pair Analysis**
+   - Identifies item/station pairs with profit margins exceeding 10%
+   - Ranks by profitability
+   - Includes supply data to ensure sufficient trade volume
 
-## Setup
+## Output
 
-1. Clone this repository
-2. GitHub Actions is configured to run automatically
-3. For local testing:
-   ```bash
-   pip install pandas numpy requests bz2file
-   python scripts/process_market_data.py
-   python scripts/process_historic_data.py
-   python scripts/generate_trade_pairs.py
-   ```
+The pipeline generates `trade_analysis.csv` with the following data:
+- Item type ID
+- Source and destination stations
+- Current lowest prices at both stations
+- Available volume and supply
+- Historical price and volume data
+- Profit margin
+- Estimated total profit potential
 
-## Output Files
+## Development
 
-- `data/processed/current_market_data.csv` - Current market data
-- `data/processed/historic_market_data.csv` - Historic market data (updated weekly)
-- `data/results/trade_pairs.csv` - All profitable trade pairs
+Requirements:
+- Python 3.8+
+- Dependencies listed in `requirements.txt`
 
-## Error Handling
+To run locally:
+```bash
+pip install -r requirements.txt
+python scripts/fetch_current_orders.py
+python scripts/fetch_historic_data.py
+python scripts/generate_trade_pairs.py
+```
 
-All scripts include error handling and logging. Check GitHub Actions logs for details if issues occur.
+## Optimizations
+
+1. Memory-efficient processing of large CSV files using chunking
+2. Parallel processing where applicable
+3. GitHub Actions caching to minimize bandwidth usage
+4. Type conversion for efficient dataframe operations
+5. Incremental updates to minimize processing time
