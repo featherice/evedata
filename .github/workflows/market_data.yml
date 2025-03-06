@@ -1,0 +1,56 @@
+name: EVE Market Data Processing
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'  # Run every 30 minutes
+  workflow_dispatch:  # Allow manual triggers
+
+jobs:
+  process-market-data:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 1
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Cache market data
+        uses: actions/cache@v3
+        with:
+          path: data/cache
+          key: ${{ runner.os }}-market-data-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-market-data-
+      
+      - name: Process current market data
+        run: python scripts/process_market_data.py
+        
+      - name: Check if weekly update needed
+        id: check_weekly
+        run: |
+          python -c "import datetime; print('::set-output name=is_monday::' + str(datetime.datetime.now().weekday() == 0).lower())"
+          
+      - name: Process historic data
+        if: steps.check_weekly.outputs.is_monday == 'true'
+        run: python scripts/process_historic_data.py
+        
+      - name: Generate trade pairs
+        run: python scripts/generate_trade_pairs.py
+        
+      - name: Commit and push changes
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'actions@github.com'
+          git add data/processed/ data/results/
+          git diff --staged --quiet || git commit -m "Update market data $(date +'%Y-%m-%d %H:%M:%S')"
+          git push || (git pull --rebase && git push)
