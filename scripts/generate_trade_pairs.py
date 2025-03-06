@@ -1,172 +1,224 @@
 #!/usr/bin/env python3
 """
-Generate trade pairs from EVE Online market data.
-Creates profitable trade pairs between hubs.
+Generate trade pair analysis for EVE Online markets.
 """
+
+import os
+import sys
 import pandas as pd
 import numpy as np
+from itertools import permutations
 import logging
-from pathlib import Path
-import io
+from tqdm import tqdm
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('trade_pairs.log')
+    ]
+)
+logger = logging.getLogger('trade_pairs')
 
 # Constants
-TRADE_HUBS = {
-    60003760: "Jita",
-    60008494: "Amarr", 
-    60004588: "Rens", 
-    60005686: "Hek", 
-    60011866: "Dodixie"
-}
-INPUT_DIR = Path("data/processed")
-OUTPUT_DIR = Path("data/results")
-PROFIT_THRESHOLD = 0.1  # 10% minimum profit margin
+RAW_DIR = "data/raw"
+PROCESSED_DIR = "data/processed"
+PROFIT_MARGIN_THRESHOLD = 0.1  # 10%
 
-def ensure_dirs():
-    """Ensure all required directories exist."""
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_directories():
+    """Ensure required directories exist."""
+    os.makedirs(PROCESSED_DIR, exist_ok=True)
 
-def load_current_data():
-    """Load current market data."""
+def load_current_orders():
+    """Load current market orders."""
     try:
-        file_path = INPUT_DIR / "current_market_data.csv"
-        if not file_path.exists():
-            logger.error(f"Current market data file not found: {file_path}")
+        file_path = os.path.join(RAW_DIR, "current_orders.csv")
+        if not os.path.exists(file_path):
+            logger.error(f"Current orders file not found: {file_path}")
             return None
             
         df = pd.read_csv(file_path)
-        logger.info(f"Loaded current market data with {len(df)} rows")
+        logger.info(f"Loaded {len(df)} current market orders")
         return df
     except Exception as e:
-        logger.error(f"Error loading current market data: {e}")
-        raise
-
-def load_historic_data():
-    """Load historic market data if available."""
-    try:
-        file_path = INPUT_DIR / "historic_market_data.csv"
-        if not file_path.exists():
-            logger.warning(f"Historic market data file not found: {file_path}")
-            return None
-            
-        df = pd.read_csv(file_path)
-        logger.info(f"Loaded historic market data with {len(df)} rows")
-        return df
-    except Exception as e:
-        logger.error(f"Error loading historic data: {e}")
+        logger.error(f"Error loading current orders: {e}")
         return None
 
-def generate_trade_pairs(current_df, historic_df=None):
-    """Generate trade pairs with profitability analysis."""
+def load_historic_data():
+    """Load historical price and volume data."""
     try:
-        pairs = []
+        prices_path = os.path.join(RAW_DIR, "historic_prices.csv")
+        volumes_path = os.path.join(RAW_DIR, "historic_volumes.csv")
         
-        # Get unique type_ids
-        type_ids = current_df['type_id'].unique()
-        logger.info(f"Processing {len(type_ids)} unique item types")
+        if not os.path.exists(prices_path) or not os.path.exists(volumes_path):
+            logger.warning("Historical data files not found")
+            return None, None
+            
+        prices_df = pd.read_csv(prices_path)
+        volumes_df = pd.read_csv(volumes_path)
         
-        for type_id in type_ids:
-            # Get data for this type_id
-            type_data = current_df[current_df['type_id'] == type_id]
+        logger.info(f"Loaded {len(prices_df)} historic price records and {len(volumes_df)} volume records")
+        return prices_df, volumes_df
+    except Exception as e:
+        logger.error(f"Error loading historical data: {e}")
+        return None, None
+
+def generate_trade_pairs(orders_df, prices_df=None, volumes_df=None):
+    """Generate trade pairs with profit potential."""
+    try:
+        if orders_df is None or len(orders_df) == 0:
+            logger.error("No order data available")
+            return None
             
-            # Generate all possible hub pairs for this type
-            stations = type_data['station_id'].unique()
-            
-            if len(stations) < 2:
+        # Convert data types for efficiency
+        orders_df['type_id'] = orders_df['type_id'].astype(np.int32)
+        orders_df['station_id'] = orders_df['station_id'].astype(np.int32)
+        
+        # Create list to hold trade pairs
+        trade_pairs = []
+        
+        # Group orders by type_id
+        grouped = orders_df.groupby('type_id')
+        
+        # For each item type
+        for type_id, item_group in tqdm(grouped, desc="Processing items"):
+            # Skip if less than 2 stations have this item
+            if len(item_group['station_id'].unique()) < 2:
                 continue
                 
-            for start_station in stations:
-                start_data = type_data[type_data['station_id'] == start_station].iloc[0]
+            # Generate all possible station pairs (source → destination)
+            for start_station, dest_station in permutations(item_group['station_id'].unique(), 2):
+                # Get orders for each station
+                start_order = item_group[item_group['station_id'] == start_station].iloc[0]
+                dest_order = item_group[item_group['station_id'] == dest_station].iloc[0]
                 
-                for dest_station in stations:
-                    if start_station == dest_station:
-                        continue
-                        
-                    dest_data = type_data[type_data['station_id'] == dest_station].iloc[0]
+                # Calculate price difference percentage
+                price_diff_pct = (dest_order['price'] - start_order['price']) / start_order['price']
+                
+                # Check if profit margin meets threshold
+                if price_diff_pct >= PROFIT_MARGIN_THRESHOLD:
+                    pair = {
+                        'type_id': int(type_id),
+                        'start_station_id': int(start_station),
+                        'dest_station_id': int(dest_station),
+                        'price_start': float(start_order['price']),
+                        'price_dest': float(dest_order['price']),
+                        'volume_remain_start': int(start_order['volume_remain']),
+                        'volume_remain_dest': int(dest_order['volume_remain']),
+                        'supply_start': int(start_order['supply']),
+                        'supply_dest': int(dest_order['supply'])
+                    }
                     
-                    # Calculate profit margin
-                    price_diff = dest_data['price'] - start_data['price']
-                    profit_margin = price_diff / start_data['price']
-                    
-                    # Only include if profit margin exceeds threshold
-                    if profit_margin >= PROFIT_THRESHOLD:
-                        pair_data = {
-                            'type_id': type_id,
-                            'start_station_id': start_station,
-                            'dest_station_id': dest_station,
-                            'price_start': start_data['price'],
-                            'price_dest': dest_data['price'],
-                            'volume_remain_start': start_data['volume_remain'],
-                            'volume_remain_dest': dest_data['volume_remain'],
-                            'supply_start': start_data['supply'],
-                            'supply_dest': dest_data['supply'],
-                            'profit_margin': profit_margin
-                        }
-                        
-                        # Add historic data if available
-                        if historic_df is not None:
-                            hist_dest = historic_df[(historic_df['type_id'] == type_id) & 
-                                                   (historic_df['station_id'] == dest_station)]
-                            
-                            if not hist_dest.empty:
-                                row = hist_dest.iloc[0]
-                                pair_data.update({
-                                    'sell_price_low_dest': row['sell_price_low'],
-                                    'sell_price_avg_dest': row['sell_price_avg'],
-                                    'sell_volume_avg_dest': row['sell_volume_avg']
-                                })
-                            else:
-                                # Set defaults if no historic data
-                                pair_data.update({
-                                    'sell_price_low_dest': None,
-                                    'sell_price_avg_dest': None,
-                                    'sell_volume_avg_dest': None
-                                })
-                        
-                        pairs.append(pair_data)
+                    trade_pairs.append(pair)
         
-        # Create dataframe from pairs
-        pairs_df = pd.DataFrame(pairs)
+        # Convert to DataFrame
+        result_df = pd.DataFrame(trade_pairs)
         
-        if pairs_df.empty:
-            logger.warning("No profitable trade pairs found")
-            return pairs_df
-            
-        # Sort by profit margin
-        pairs_df = pairs_df.sort_values('profit_margin', ascending=False)
-        logger.info(f"Generated {len(pairs_df)} profitable trade pairs")
+        # Add historical data if available
+        if prices_df is not None and volumes_df is not None:
+            logger.info("Adding historical data to trade pairs")
+            result_df = add_historical_data(result_df, prices_df, volumes_df)
         
-        return pairs_df
+        logger.info(f"Generated {len(result_df)} trade pairs with profit potential")
+        return result_df
+    
     except Exception as e:
         logger.error(f"Error generating trade pairs: {e}")
-        raise
+        return None
+
+def add_historical_data(trade_pairs_df, prices_df, volumes_df):
+    """Add historical price and volume data to trade pairs."""
+    try:
+        # Make sure type_id and station_id are the same data type for merging
+        prices_df['type_id'] = prices_df['type_id'].astype(np.int32)
+        prices_df['location_id'] = prices_df['location_id'].astype(np.int32)
+        volumes_df['type_id'] = volumes_df['type_id'].astype(np.int32)
+        volumes_df['location_id'] = volumes_df['location_id'].astype(np.int32)
+        
+        # Select only the most recent data for each type/location
+        prices_df = prices_df.sort_values('date', ascending=False)
+        prices_df = prices_df.drop_duplicates(subset=['type_id', 'location_id'], keep='first')
+        
+        volumes_df = volumes_df.sort_values('date', ascending=False)
+        volumes_df = volumes_df.drop_duplicates(subset=['type_id', 'location_id'], keep='first')
+        
+        # Select only needed columns from historical data
+        needed_price_cols = ['sell_price_low', 'sell_price_avg']
+        needed_volume_cols = ['sell_volume_avg']
+        
+        # Join historical price data for destination station
+        result_df = trade_pairs_df.merge(
+            prices_df[['type_id', 'location_id'] + needed_price_cols],
+            left_on=['type_id', 'dest_station_id'],
+            right_on=['type_id', 'location_id'],
+            how='left'
+        )
+        
+        # Rename columns to indicate destination
+        for col in needed_price_cols:
+            result_df = result_df.rename(columns={col: f"{col}_dest"})
+        
+        # Remove redundant location_id column
+        result_df = result_df.drop('location_id', axis=1)
+        
+        # Join historical volume data for destination station
+        result_df = result_df.merge(
+            volumes_df[['type_id', 'location_id'] + needed_volume_cols],
+            left_on=['type_id', 'dest_station_id'],
+            right_on=['type_id', 'location_id'],
+            how='left'
+        )
+        
+        # Rename columns to indicate destination
+        for col in needed_volume_cols:
+            result_df = result_df.rename(columns={col: f"{col}_dest"})
+        
+        # Remove redundant location_id column
+        result_df = result_df.drop('location_id', axis=1)
+        
+        return result_df
+        
+    except Exception as e:
+        logger.error(f"Error adding historical data: {e}")
+        # Return original DataFrame if there's an error
+        return trade_pairs_df
 
 def main():
-    """Main function to generate trade pairs."""
+    """Main function to generate trade pair analysis."""
     try:
-        ensure_dirs()
+        ensure_directories()
         
-        # Load data
-        current_df = load_current_data()
-        if current_df is None:
-            return
-            
-        historic_df = load_historic_data()
+        # Load current orders
+        orders_df = load_current_orders()
+        if orders_df is None:
+            logger.error("Cannot proceed without current orders data")
+            sys.exit(1)
+        
+        # Load historical data
+        prices_df, volumes_df = load_historic_data()
         
         # Generate trade pairs
-        pairs_df = generate_trade_pairs(current_df, historic_df)
+        trade_pairs = generate_trade_pairs(orders_df, prices_df, volumes_df)
+        if trade_pairs is None or len(trade_pairs) == 0:
+            logger.warning("No profitable trade pairs found")
+            # Create empty file to avoid errors
+            empty_df = pd.DataFrame(columns=[
+                'type_id', 'start_station_id', 'dest_station_id', 
+                'price_start', 'price_dest'
+            ])
+            empty_df.to_csv(os.path.join(PROCESSED_DIR, "trade_analysis.csv"), index=False)
+            return
         
-        if not pairs_df.empty:
-            # Save results
-            output_path = OUTPUT_DIR / "trade_pairs.csv"
-            pairs_df.to_csv(output_path, index=False)
-            logger.info(f"Saved {len(pairs_df)} trade pairs to {output_path}")
+        # Save trade pairs analysis
+        output_path = os.path.join(PROCESSED_DIR, "trade_analysis.csv")
+        trade_pairs.to_csv(output_path, index=False)
+        logger.info(f"Saved trade analysis to {output_path}")
+        
     except Exception as e:
-        logger.error(f"Error in main processing: {e}")
-        raise
+        logger.error(f"Fatal error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
