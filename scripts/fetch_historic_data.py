@@ -7,6 +7,7 @@ import os
 import sys
 import requests
 import pandas as pd
+import io
 from datetime import datetime, timedelta
 import logging
 from tqdm import tqdm
